@@ -1,128 +1,250 @@
-// Service Worker for Mirror On The Wall PWA
-const CACHE_NAME = 'mirror-safe-v1.0.0';
-const API_CACHE_NAME = 'mirror-api-cache-v1.0.0';
+// Service Worker for Kids Safety PWA
+const CACHE_NAME = 'kids-safety-v1.2.0';
+const EMERGENCY_CACHE = 'emergency-cache-v1';
 
-// Static assets to cache
-const STATIC_ASSETS = [
+// Essential files to cache for offline functionality
+const ESSENTIAL_FILES = [
   '/',
   '/index.html',
-  '/static/css/main.css',
-  '/static/js/main.js',
   '/manifest.json',
-  '/icons/icon-192x192.png',
-  '/icons/icon-512x512.png',
-  '/offline.html'
+  '/css/app.css',
+  '/js/app.js',
+  '/js/pwautils.js',
+  '/icons/icon-192.png',
+  '/icons/icon-512.png',
+  '/icons/safety-alert-192.png'
 ];
 
-// API endpoints to cache
-const API_ENDPOINTS = [
-  '/api/children',
-  '/api/messages',
-  '/api/alerts'
+// Emergency pages that must always be available
+const EMERGENCY_FILES = [
+  '/emergency.html',
+  '/emergency-contacts.html',
+  '/offline-safety.html'
 ];
 
-// Install event - cache static assets
+// Install event - cache essential files
 self.addEventListener('install', (event) => {
-  console.log('Service Worker: Installing...');
+  console.log('Service Worker installing...');
   
   event.waitUntil(
-    caches.open(CACHE_NAME)
-      .then((cache) => {
-        console.log('Service Worker: Caching static assets');
-        return cache.addAll(STATIC_ASSETS);
+    Promise.all([
+      // Cache essential files
+      caches.open(CACHE_NAME).then((cache) => {
+        return cache.addAll(ESSENTIAL_FILES);
+      }),
+      // Cache emergency files separately
+      caches.open(EMERGENCY_CACHE).then((cache) => {
+        return cache.addAll(EMERGENCY_FILES);
       })
-      .then(() => {
-        console.log('Service Worker: Static assets cached');
-        return self.skipWaiting();
-      })
-      .catch((error) => {
-        console.error('Service Worker: Cache failed', error);
-      })
+    ]).then(() => {
+      console.log('Service Worker installed and files cached');
+      // Force activation
+      return self.skipWaiting();
+    })
   );
 });
 
 // Activate event - clean up old caches
 self.addEventListener('activate', (event) => {
-  console.log('Service Worker: Activating...');
+  console.log('Service Worker activating...');
   
   event.waitUntil(
-    caches.keys()
-      .then((cacheNames) => {
-        return Promise.all(
-          cacheNames.map((cacheName) => {
-            if (cacheName !== CACHE_NAME && cacheName !== API_CACHE_NAME) {
-              console.log('Service Worker: Deleting old cache', cacheName);
-              return caches.delete(cacheName);
-            }
-          })
-        );
-      })
-      .then(() => {
-        console.log('Service Worker: Activated');
-        return self.clients.claim();
-      })
+    caches.keys().then((cacheNames) => {
+      return Promise.all(
+        cacheNames.map((cacheName) => {
+          if (cacheName !== CACHE_NAME && cacheName !== EMERGENCY_CACHE) {
+            console.log('Deleting old cache:', cacheName);
+            return caches.delete(cacheName);
+          }
+        })
+      );
+    }).then(() => {
+      console.log('Service Worker activated');
+      return self.clients.claim();
+    })
   );
 });
 
-// Fetch event - implement caching strategy
+// Fetch event - handle network requests
 self.addEventListener('fetch', (event) => {
   const { request } = event;
   const url = new URL(request.url);
 
-  // Handle API requests
-  if (url.pathname.startsWith('/api/')) {
-    event.respondWith(handleApiRequest(request));
-    return;
-  }
-
-  // Handle static assets
-  if (request.destination === 'document' || 
-      request.destination === 'script' || 
-      request.destination === 'style' || 
-      request.destination === 'image') {
+  // Handle different types of requests
+  if (isEmergencyRequest(request)) {
+    event.respondWith(handleEmergencyRequest(request));
+  } else if (isSafetyAPIRequest(request)) {
+    event.respondWith(handleSafetyAPIRequest(request));
+  } else if (isStaticAsset(request)) {
     event.respondWith(handleStaticAsset(request));
-    return;
+  } else {
+    event.respondWith(handleGenericRequest(request));
+  }
+});
+
+// Background sync for safety data
+self.addEventListener('sync', (event) => {
+  console.log('Background sync triggered:', event.tag);
+  
+  if (event.tag === 'background-sync-safety') {
+    event.waitUntil(syncSafetyData());
+  } else if (event.tag === 'background-sync-messages') {
+    event.waitUntil(syncMessages());
+  } else if (event.tag === 'background-sync-alerts') {
+    event.waitUntil(syncAlerts());
+  }
+});
+
+// Push notifications for safety alerts
+self.addEventListener('push', (event) => {
+  console.log('Push notification received');
+  
+  let notificationData = {
+    title: 'Safety Alert',
+    body: 'You have a new safety notification',
+    icon: '/icons/safety-alert-192.png',
+    badge: '/icons/badge-72.png'
+  };
+
+  if (event.data) {
+    try {
+      const data = event.data.json();
+      notificationData = {
+        title: `🚨 ${data.type || 'Safety'} Alert`,
+        body: data.message || data.body,
+        icon: '/icons/safety-alert-192.png',
+        badge: '/icons/badge-72.png',
+        tag: data.tag || 'safety-alert',
+        requireInteraction: data.level === 'critical',
+        vibrate: [200, 100, 200, 100, 200],
+        actions: [
+          { action: 'open', title: 'Open App', icon: '/icons/open.png' },
+          { action: 'safe', title: 'I\'m Safe', icon: '/icons/safe.png' },
+          { action: 'help', title: 'Need Help', icon: '/icons/help.png' }
+        ],
+        data: data
+      };
+    } catch (error) {
+      console.error('Error parsing push data:', error);
+    }
   }
 
-  // Default: network first, cache fallback
-  event.respondWith(
-    fetch(request)
-      .catch(() => caches.match('/offline.html'))
+  event.waitUntil(
+    self.registration.showNotification(notificationData.title, notificationData)
   );
 });
 
-// Handle API requests with network-first strategy
-async function handleApiRequest(request) {
-  const cache = await caches.open(API_CACHE_NAME);
+// Handle notification clicks
+self.addEventListener('notificationclick', (event) => {
+  console.log('Notification clicked:', event.action);
   
+  event.notification.close();
+
+  const action = event.action;
+  const notificationData = event.notification.data;
+
+  if (action === 'safe') {
+    // Send "I'm safe" response
+    event.waitUntil(sendSafeResponse(notificationData));
+  } else if (action === 'help') {
+    // Trigger help request
+    event.waitUntil(triggerHelpRequest(notificationData));
+  } else {
+    // Default action - open app
+    event.waitUntil(openApp('/safety-dashboard'));
+  }
+});
+
+// Helper functions
+function isEmergencyRequest(request) {
+  return request.url.includes('/emergency') || 
+         request.url.includes('/safety-alert') ||
+         request.url.includes('/panic');
+}
+
+function isSafetyAPIRequest(request) {
+  return request.url.includes('/api/safety') ||
+         request.url.includes('/api/emergency') ||
+         request.url.includes('/api/alerts');
+}
+
+function isStaticAsset(request) {
+  return request.url.includes('/css/') ||
+         request.url.includes('/js/') ||
+         request.url.includes('/images/') ||
+         request.url.includes('/icons/') ||
+         request.url.includes('.png') ||
+         request.url.includes('.jpg') ||
+         request.url.includes('.css') ||
+         request.url.includes('.js');
+}
+
+// Handle emergency requests - always try network first
+async function handleEmergencyRequest(request) {
   try {
-    // Try network first
+    // Emergency requests always go to network first
     const networkResponse = await fetch(request);
     
+    // Cache successful emergency responses
     if (networkResponse.ok) {
-      // Cache successful responses
+      const cache = await caches.open(EMERGENCY_CACHE);
       cache.put(request, networkResponse.clone());
     }
     
     return networkResponse;
   } catch (error) {
-    console.log('Network failed, trying cache:', error);
+    console.log('Emergency request failed, trying cache:', error);
     
-    // Fallback to cache
-    const cachedResponse = await cache.match(request);
+    // Fallback to cache for emergency pages
+    const cachedResponse = await caches.match(request);
     if (cachedResponse) {
       return cachedResponse;
     }
     
-    // Return offline response for failed API calls
+    // Ultimate fallback for emergency
     return new Response(
-      JSON.stringify({ 
-        error: 'Offline', 
-        message: 'Data not available offline',
-        cached: false 
+      `<!DOCTYPE html>
+      <html>
+      <head>
+        <title>Emergency Mode</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+      </head>
+      <body style="font-family: Arial, sans-serif; padding: 20px; text-align: center;">
+        <h1>🚨 Emergency Mode</h1>
+        <p>You are in offline emergency mode.</p>
+        <p>Your safety data is being stored locally and will sync when connection returns.</p>
+        <button onclick="window.location.href='/'" style="padding: 10px 20px; font-size: 16px;">
+          Return to Safety Dashboard
+        </button>
+      </body>
+      </html>`,
+      { headers: { 'Content-Type': 'text/html' } }
+    );
+  }
+}
+
+// Handle safety API requests
+async function handleSafetyAPIRequest(request) {
+  try {
+    const networkResponse = await fetch(request);
+    return networkResponse;
+  } catch (error) {
+    console.log('Safety API request failed:', error);
+    
+    // Store failed requests for later sync
+    if (request.method === 'POST') {
+      await storeFailedRequest(request);
+    }
+    
+    // Return appropriate offline response
+    return new Response(
+      JSON.stringify({
+        error: 'offline',
+        message: 'Request stored for sync when online',
+        timestamp: Date.now()
       }),
       {
-        status: 503,
+        status: 202,
         headers: { 'Content-Type': 'application/json' }
       }
     );
@@ -131,8 +253,7 @@ async function handleApiRequest(request) {
 
 // Handle static assets with cache-first strategy
 async function handleStaticAsset(request) {
-  const cache = await caches.open(CACHE_NAME);
-  const cachedResponse = await cache.match(request);
+  const cachedResponse = await caches.match(request);
   
   if (cachedResponse) {
     return cachedResponse;
@@ -140,121 +261,182 @@ async function handleStaticAsset(request) {
   
   try {
     const networkResponse = await fetch(request);
+    
     if (networkResponse.ok) {
+      const cache = await caches.open(CACHE_NAME);
       cache.put(request, networkResponse.clone());
     }
+    
     return networkResponse;
   } catch (error) {
-    // Fallback for failed requests
-    if (request.destination === 'document') {
-      return cache.match('/offline.html');
+    console.log('Static asset failed to load:', error);
+    
+    // Return a placeholder for failed images
+    if (request.url.includes('.png') || request.url.includes('.jpg')) {
+      return new Response(
+        '<svg width="100" height="100" xmlns="http://www.w3.org/2000/svg"><rect width="100" height="100" fill="#f3f4f6"/><text x="50" y="50" text-anchor="middle" dy=".3em">📱</text></svg>',
+        { headers: { 'Content-Type': 'image/svg+xml' } }
+      );
     }
+    
     throw error;
   }
 }
 
-// Background sync for sending queued data
-self.addEventListener('sync', (event) => {
-  if (event.tag === 'background-sync-messages') {
-    event.waitUntil(syncMessages());
+// Handle generic requests with network-first strategy
+async function handleGenericRequest(request) {
+  try {
+    const networkResponse = await fetch(request);
+    
+    // Cache successful GET requests
+    if (networkResponse.ok && request.method === 'GET') {
+      const cache = await caches.open(CACHE_NAME);
+      cache.put(request, networkResponse.clone());
+    }
+    
+    return networkResponse;
+  } catch (error) {
+    const cachedResponse = await caches.match(request);
+    
+    if (cachedResponse) {
+      return cachedResponse;
+    }
+    
+    // Return offline page for navigation requests
+    if (request.mode === 'navigate') {
+      const offlinePage = await caches.match('/offline-safety.html');
+      if (offlinePage) {
+        return offlinePage;
+      }
+    }
+    
+    throw error;
+  }
+}
+
+// Background sync functions
+async function syncSafetyData() {
+  try {
+    const pendingRequests = await getStoredRequests('safety');
+    
+    for (const requestData of pendingRequests) {
+      try {
+        const response = await fetch(requestData.url, {
+          method: requestData.method,
+          headers: requestData.headers,
+          body: requestData.body
+        });
+        
+        if (response.ok) {
+          await removeStoredRequest(requestData.id);
+          console.log('Safety data synced successfully');
+        }
+      } catch (error) {
+        console.error('Failed to sync safety data:', error);
+      }
+    }
+  } catch (error) {
+    console.error('Safety data sync failed:', error);
+  }
+}
+
+async function syncMessages() {
+  console.log('Syncing messages...');
+  // Implement message sync logic
+}
+
+async function syncAlerts() {
+  console.log('Syncing alerts...');
+  // Implement alert sync logic
+}
+
+// Notification action handlers
+async function sendSafeResponse(data) {
+  try {
+    await fetch('/api/safety/safe-response', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        alertId: data.alertId,
+        response: 'safe',
+        timestamp: Date.now()
+      })
+    });
+    
+    // Notify main app
+    const clients = await self.clients.matchAll();
+    clients.forEach(client => {
+      client.postMessage({
+        type: 'SAFE_RESPONSE_SENT',
+        data: data
+      });
+    });
+  } catch (error) {
+    console.error('Failed to send safe response:', error);
+  }
+}
+
+async function triggerHelpRequest(data) {
+  try {
+    await fetch('/api/safety/help-request', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        alertId: data.alertId,
+        response: 'help',
+        timestamp: Date.now(),
+        urgent: true
+      })
+    });
+    
+    // Open app to help page
+    await openApp('/emergency-help');
+  } catch (error) {
+    console.error('Failed to send help request:', error);
+  }
+}
+
+async function openApp(path = '/') {
+  const clients = await self.clients.matchAll({ type: 'window' });
+  
+  // If app is already open, focus it
+  if (clients.length > 0) {
+    const client = clients[0];
+    client.focus();
+    client.navigate(path);
+    return;
   }
   
-  if (event.tag === 'background-sync-alerts') {
-    event.waitUntil(syncAlerts());
-  }
-});
-
-// Sync queued messages when online
-async function syncMessages() {
-  try {
-    const cache = await caches.open('message-queue');
-    const requests = await cache.keys();
-    
-    for (const request of requests) {
-      try {
-        await fetch(request);
-        await cache.delete(request);
-        console.log('Message synced successfully');
-      } catch (error) {
-        console.error('Failed to sync message:', error);
-      }
-    }
-  } catch (error) {
-    console.error('Background sync failed:', error);
-  }
+  // Otherwise, open new window
+  return self.clients.openWindow(path);
 }
 
-// Sync queued alerts when online
-async function syncAlerts() {
-  try {
-    const cache = await caches.open('alert-queue');
-    const requests = await cache.keys();
-    
-    for (const request of requests) {
-      try {
-        await fetch(request);
-        await cache.delete(request);
-        console.log('Alert synced successfully');
-      } catch (error) {
-        console.error('Failed to sync alert:', error);
-      }
-    }
-  } catch (error) {
-    console.error('Alert sync failed:', error);
-  }
-}
-
-// Push notification handling
-self.addEventListener('push', (event) => {
-  const options = {
-    body: 'You have a new safety alert',
-    icon: '/icons/icon-192x192.png',
-    badge: '/icons/badge-72x72.png',
-    vibrate: [200, 100, 200],
-    data: {
-      dateOfArrival: Date.now(),
-      primaryKey: 1
-    },
-    actions: [
-      {
-        action: 'view',
-        title: 'View Alert',
-        icon: '/icons/view-icon.png'
-      },
-      {
-        action: 'dismiss',
-        title: 'Dismiss',
-        icon: '/icons/dismiss-icon.png'
-      }
-    ]
+// Storage utilities for failed requests
+async function storeFailedRequest(request) {
+  const requestData = {
+    id: Date.now() + Math.random(),
+    url: request.url,
+    method: request.method,
+    headers: Object.fromEntries(request.headers.entries()),
+    body: await request.text(),
+    timestamp: Date.now(),
+    type: 'safety'
   };
+  
+  // Store in IndexedDB or localStorage
+  // Implementation depends on your storage preference
+  console.log('Storing failed request for later sync:', requestData);
+}
 
-  if (event.data) {
-    const data = event.data.json();
-    options.body = data.message || options.body;
-    options.data = { ...options.data, ...data };
-  }
+async function getStoredRequests(type) {
+  // Retrieve stored requests from IndexedDB or localStorage
+  // Return array of stored requests
+  return [];
+}
 
-  event.waitUntil(
-    self.registration.showNotification('Mirror Safe Alert', options)
-  );
-});
+async function removeStoredRequest(id) {
+  // Remove successfully synced request from storage
+  console.log('Removing synced request:', id);
+}
 
-// Handle notification clicks
-self.addEventListener('notificationclick', (event) => {
-  event.notification.close();
-
-  if (event.action === 'view') {
-    event.waitUntil(
-      clients.openWindow('/alerts')
-    );
-  } else if (event.action === 'dismiss') {
-    // Just close the notification
-    return;
-  } else {
-    // Default action - open the app
-    event.waitUntil(
-      clients.openWindow('/')
-    );
-  }
-});
+console.log('Service Worker loaded successfully');
